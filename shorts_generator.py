@@ -155,10 +155,25 @@ def parse_srt_for_alignment(srt_path: str, start: float, end: float) -> list:
     for event in subs:
         ev_start = event.start / 1000.0
         ev_end = event.end / 1000.0
-        if ev_end < start or ev_start > end:
+        if ev_end <= start or ev_start >= end:
             continue
+
+        text = event.plaintext.strip()
+
+        # Entry straddles segment end — trim at sentence boundary near proportional cut
+        if ev_end > end:
+            ws = text.split()
+            fraction = (end - max(ev_start, start)) / (ev_end - ev_start)
+            n_est = int(len(ws) * fraction)  # floor — slightly under
+            cut = n_est
+            for i in range(n_est - 1, -1, -1):
+                if ws[i].rstrip("\"'").endswith((".", "!", "?", "...")):
+                    cut = i + 1
+                    break
+            text = " ".join(ws[:max(1, cut)])
+
         segments.append({
-            "text": event.plaintext.strip(),
+            "text": text,
             "start": max(0.0, ev_start - start),
             "end": min(end - start, ev_end - start),
         })
@@ -228,11 +243,12 @@ def generate_karaoke_ass(words: list, output_path: str) -> None:
     for i in range(0, len(words), LINE_WORDS):
         line = words[i : i + LINE_WORDS]
         for j, active in enumerate(line):
-            end_ms = (
-                int(line[j + 1]["start"] * 1000)
-                if j < len(line) - 1
-                else int(active["end"] * 1000)
-            )
+            if j < len(line) - 1:
+                end_ms = int(line[j + 1]["start"] * 1000)
+            elif i + LINE_WORDS < len(words):
+                end_ms = int(words[i + LINE_WORDS]["start"] * 1000)
+            else:
+                end_ms = int(active["end"] * 1000)
             parts = []
             for k, w in enumerate(line):
                 if k == j:
