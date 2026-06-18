@@ -1,21 +1,28 @@
 # shorts-generator
 
-Generează automat Shorts / Reels 9:16 din videouri YouTube 1920×1080.
+Automatically generates 9:16 Shorts / Reels from 1920×1080 YouTube videos.
 
-**Ce face:**
-- Detectează automat poziția feței și calculează crop-ul 608×1080
-- Rulează Whisper cu word timestamps pe segmentul audio
-- Generează subtitrare ASS cu karaoke highlighting (cuvântul curent = galben)
-- Randează totul cu ffmpeg + h264_nvenc (GPU)
+**What it does:**
+- Detects face position and computes 608×1080 crop automatically
+- Runs forced alignment (WhisperX) on a corrected SRT to get word-level timestamps
+- Generates ASS subtitle file with karaoke highlighting (active word = yellow)
+- Renders with ffmpeg + h264_nvenc (GPU)
 
 ---
 
-## Instalare
+## Requirements
 
-**Cerințe:** Python 3.10+, `uv`, `ffmpeg` cu nvenc, `whisper` (openai-whisper via pipx)
+- Python 3.10+
+- [`uv`](https://github.com/astral-sh/uv)
+- `ffmpeg` with nvenc support
+- [`whisperx`](https://github.com/m-bain/whisperX) — for forced alignment
+
+---
+
+## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/shorts-generator.git
+git clone https://github.com/Dorusto/shorts-generator.git
 cd shorts-generator
 uv venv
 uv pip install -r requirements.txt
@@ -23,15 +30,16 @@ uv pip install -r requirements.txt
 
 ---
 
-## Utilizare
+## Usage
 
-### 1. Configurează segmentele
+### 1. Configure segments
 
-Copiază `shorts_config_example.yaml` → `shorts_config.yaml` și completează:
+Copy `shorts_config_example.yaml` → `shorts_config.yaml` and fill in your segments:
 
 ```yaml
-video: "NumeVideo.mp4"
-audio: "NumeVideo.mp3"
+video: "MyVideo.mp4"
+audio: "MyVideo.mp3"
+srt: "MyVideo_corrected.srt"
 
 segments:
   - name: "Hook"
@@ -43,68 +51,51 @@ segments:
     end: "00:01:52"
 ```
 
-### 2. Rulează
+### 2. Run
 
-**Mod interactiv** (te întreabă calea video):
+**Interactive mode** (prompts for video path):
 ```bash
 .venv/bin/python shorts_generator.py
 ```
 
-**Mod direct** (pentru automatizare):
+**Direct mode:**
 ```bash
 .venv/bin/python shorts_generator.py \
-  --video /cale/catre/video.mp4 \
-  --audio /cale/catre/audio.mp3
-```
-
-**Rerandez fără Whisper** (după corecții manuale în `_words.json`):
-```bash
-.venv/bin/python shorts_generator.py \
-  --video /cale/catre/video.mp4 \
-  --skip-whisper
+  --video /path/to/video.mp4 \
+  --srt /path/to/corrected.srt
 ```
 
 ### 3. Output
 
-Short-urile apar în `shorts/` lângă fișierul video:
+Shorts are saved in a `shorts/` folder next to the video file:
 ```
 shorts/Short1-Hook.mp4
 shorts/Short2-Reframing.mp4
 
-auto/Hook_words.json       # word timestamps (editabil)
-auto/Hook_karaoke.ass      # subtitrare generată
+auto/Hook_words.json       # word timestamps from forced alignment
+auto/Hook_karaoke.ass      # generated karaoke subtitles
 ```
 
 ---
 
-## Structura fișierelor video
-
-Scriptul se așteaptă la această structură (dar se adaptează automat):
+## Expected folder structure
 
 ```
 Export/
-  video/    NumeVideo.mp4
-  audio/    NumeVideo.mp3
-  subtitles/
-  shorts/   ← output generat
-  auto/     ← JSON + ASS intermediare
+  video/     MyVideo.mp4
+  audio/     MyVideo.mp3
+  subtitles/ MyVideo_corrected.srt
+  shorts/    ← generated output
+  auto/      ← intermediate JSON + ASS files
 ```
 
 ---
 
-## Stack tehnic
+## Tech stack
 
-| Componentă | Tool |
+| Component | Tool |
 |:---|:---|
-| Taiere + crop + burn subtitles | `ffmpeg` cu `h264_nvenc` |
-| Word-level timestamps | `whisper turbo --word_timestamps True` |
-| Face detection pentru crop | `opencv-python` (Haar cascades) |
-| Manipulare ASS | `pysubs2` |
-
----
-
-## Corecții manuale
-
-Whisper poate greși ocazional. Corectează direct în `auto/NumeVideo_words.json`, apoi rerandez cu `--skip-whisper`.
-
-> **Roadmap:** înlocuire Whisper cu forced alignment pe transcript corectat (WhisperX).
+| Cut + crop + burn subtitles | `ffmpeg` with `h264_nvenc` |
+| Word-level alignment | `whisperx` forced alignment on corrected SRT |
+| Face detection for crop | `opencv-python` (Haar cascades) |
+| ASS subtitle manipulation | `pysubs2` |

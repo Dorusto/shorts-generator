@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Generează Shorts / Reels din videouri 1920×1080.
-Rulează din ~/Proiecte-AI/YouTube/shorts-generator/ fără argumente.
+Generates 9:16 Shorts / Reels from 1920x1080 videos.
+Run from the shorts-generator folder — no arguments needed.
 """
 
 import argparse
@@ -13,18 +13,22 @@ from pathlib import Path
 
 import cv2
 import pysubs2
+import torch
+import whisperx
 import yaml
 
 CROP_W = 608
 CROP_H = 1080
 SRC_W = 1920
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 SCRIPT_DIR = Path(__file__).parent
 CONFIG_PATH = SCRIPT_DIR / "shorts_config.yaml"
 
 YAML_TEMPLATE = """\
-video: "NumeVideo.mp4"
-audio: "NumeVideo.mp3"
+video: "MyVideo.mp4"
+audio: "MyVideo.mp3"
+srt: "MyVideo_corrected.srt"
 
 segments:
   - name: "Hook"
@@ -32,70 +36,70 @@ segments:
     end: "00:00:56"
 
   - name: "Segment2"
-    start: "01:02:00"
-    end: "01:52:00"
+    start: "00:01:02"
+    end: "00:01:52"
 """
 
 
 # ---------------------------------------------------------------------------
-# Setup & validare
+# Setup & validation
 # ---------------------------------------------------------------------------
 
 def load_and_validate_config() -> dict:
     if not CONFIG_PATH.exists():
         CONFIG_PATH.write_text(YAML_TEMPLATE)
-        print(f"Am creat {CONFIG_PATH.name} cu un template.")
-        print("Completează-l cu numele fișierelor și segmentele dorite, apoi rulează din nou.")
+        print(f"Created {CONFIG_PATH.name} from template.")
+        print("Fill in your video/audio/srt filenames and segments, then run again.")
         sys.exit(0)
 
     config = yaml.safe_load(CONFIG_PATH.read_text())
     errors = []
 
-    if not config.get("video") or config["video"] == "NumeVideo.mp4":
-        errors.append("  - 'video:' lipsește sau e necompletat")
-    if not config.get("audio") or config["audio"] == "NumeVideo.mp3":
-        errors.append("  - 'audio:' lipsește sau e necompletat")
+    if not config.get("video") or config["video"] == "MyVideo.mp4":
+        errors.append("  - 'video:' missing or not filled in")
+    if not config.get("audio") or config["audio"] == "MyVideo.mp3":
+        errors.append("  - 'audio:' missing or not filled in")
+    if not config.get("srt") or config["srt"] == "MyVideo_corrected.srt":
+        errors.append("  - 'srt:' missing or not filled in")
     if not config.get("segments"):
-        errors.append("  - 'segments:' lipsește sau e gol")
+        errors.append("  - 'segments:' missing or empty")
 
     if errors:
-        print(f"{CONFIG_PATH.name} nu e completat:\n" + "\n".join(errors))
-        print("Completează-l și rulează din nou.")
+        print(f"{CONFIG_PATH.name} is not complete:\n" + "\n".join(errors))
+        print("Fill it in and run again.")
         sys.exit(0)
 
     return config
 
 
 def ask_video_path() -> Path:
-    print("\nCalea către fișierul video:")
-    print("  (ex: ~/Videos/Lenea/Export/video/Lenea.mp4)")
+    print("\nPath to the video file:")
+    print("  (e.g. ~/Videos/MyClip/Export/video/MyClip.mp4)")
     raw = input("> ").strip()
     path = Path(raw).expanduser().resolve()
     if not path.exists():
-        print(f"Fișierul nu există: {path}")
+        print(f"File not found: {path}")
         sys.exit(1)
     return path
 
 
-def find_audio(video_path: Path, audio_name: str) -> Path:
-    """
-    Caută audio_name în: același folder, folderul audio/ din parent, parent direct.
-    """
+def find_file(base_path: Path, filename: str, subfolder: str) -> Path:
+    """Look for filename in: same dir, parent/subfolder/, parent/."""
     candidates = [
-        video_path.parent / audio_name,
-        video_path.parent.parent / "audio" / audio_name,
-        video_path.parent.parent / audio_name,
+        base_path.parent / filename,
+        base_path.parent.parent / subfolder / filename,
+        base_path.parent.parent / filename,
     ]
     for c in candidates:
         if c.exists():
             return c
 
-    print(f"\nNu am găsit {audio_name} automat.")
-    print("Calea către fișierul audio:")
+    print(f"\nCould not find {filename} automatically.")
+    print(f"Path to {filename}:")
     raw = input("> ").strip()
     path = Path(raw).expanduser().resolve()
     if not path.exists():
-        print(f"Fișierul nu există: {path}")
+        print(f"File not found: {path}")
         sys.exit(1)
     return path
 
@@ -134,43 +138,64 @@ def detect_face_offset(video_path: str, start: float, end: float) -> int:
     cap.release()
 
     if not x_centers:
-        print("     [warn] față nedetectată — folosesc centru")
+        print("     [warn] no face detected — using center")
         return (SRC_W - CROP_W) // 2
 
     avg_x = sum(x_centers) / len(x_centers)
     return max(0, min(int(avg_x - CROP_W / 2), SRC_W - CROP_W))
 
 
-def run_whisper(audio_path: str, start: float, end: float, tmpdir: str) -> list:
-    seg_audio = str(Path(tmpdir) / "seg.wav")
+def parse_srt_for_alignment(srt_path: str, start: float, end: float) -> list:
+    """
+    Parse corrected SRT and return WhisperX-format segments
+    with timestamps relative to the segment start (0-based).
+    """
+    subs = pysubs2.load(srt_path)
+    segments = []
+    for event in subs:
+        ev_start = event.start / 1000.0
+        ev_end = event.end / 1000.0
+        if ev_end < start or ev_start > end:
+            continue
+        segments.append({
+            "text": event.plaintext.strip(),
+            "start": max(0.0, ev_start - start),
+            "end": min(end - start, ev_end - start),
+        })
+    return segments
 
+
+def run_forced_alignment(audio_path: str, srt_path: str, start: float, end: float, tmpdir: str) -> list:
+    """
+    Extract audio segment, then use WhisperX forced alignment
+    on the corrected SRT to get accurate word-level timestamps.
+    Returns [{word, start, end}] with timestamps relative to segment start.
+    """
+    seg_audio = str(Path(tmpdir) / "seg.wav")
     subprocess.run(
         ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", audio_path, seg_audio],
         check=True, capture_output=True,
     )
-    subprocess.run(
-        [
-            "whisper", seg_audio,
-            "--output_format", "json",
-            "--output_dir", tmpdir,
-            "--language", "ro",
-            "--model", "turbo",
-            "--word_timestamps", "True",
-        ],
-        check=True,
-    )
 
-    data = json.loads((Path(tmpdir) / "seg.json").read_text())
+    audio = whisperx.load_audio(seg_audio)
+    segments = parse_srt_for_alignment(srt_path, start, end)
+
+    if not segments:
+        print("     [warn] no SRT entries found for this segment")
+        return []
+
+    model_a, metadata = whisperx.load_align_model(language_code="ro", device=DEVICE)
+    result = whisperx.align(segments, model_a, metadata, audio, device=DEVICE, return_char_alignments=False)
+
     return [
-        {"word": w["word"].strip(), "start": w["start"], "end": w["end"]}
-        for seg in data.get("segments", [])
-        for w in seg.get("words", [])
+        {"word": w["word"].strip(), "start": round(w["start"], 3), "end": round(w["end"], 3)}
+        for w in result.get("word_segments", [])
         if w.get("word", "").strip()
     ]
 
 
 def merge_hyphenated(words: list) -> list:
-    """Reunește fragmentele cu cratimă: ["task", "-ul"] → ["task-ul"]."""
+    """Merge hyphenated fragments: ["task", "-ul"] → ["task-ul"]."""
     merged = []
     for w in words:
         if w["word"].startswith("-") and merged:
@@ -203,12 +228,11 @@ def generate_karaoke_ass(words: list, output_path: str) -> None:
     for i in range(0, len(words), LINE_WORDS):
         line = words[i : i + LINE_WORDS]
         for j, active in enumerate(line):
-            # Extind până la start-ul cuvântului următor (elimină clipirea)
-            if j < len(line) - 1:
-                end_ms = int(line[j + 1]["start"] * 1000)
-            else:
-                end_ms = int(active["end"] * 1000)
-
+            end_ms = (
+                int(line[j + 1]["start"] * 1000)
+                if j < len(line) - 1
+                else int(active["end"] * 1000)
+            )
             parts = []
             for k, w in enumerate(line):
                 if k == j:
@@ -251,7 +275,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--video", type=str, default=None)
     parser.add_argument("--audio", type=str, default=None)
-    parser.add_argument("--skip-whisper", action="store_true")
+    parser.add_argument("--srt", type=str, default=None)
+    parser.add_argument("--skip-alignment", action="store_true",
+                        help="Use existing _words.json instead of re-running alignment")
     args, _ = parser.parse_known_args()
 
     print("=== Shorts Generator ===")
@@ -261,17 +287,22 @@ def main() -> None:
     if args.video:
         video_path = Path(args.video).expanduser().resolve()
         if not video_path.exists():
-            print(f"Fișierul nu există: {video_path}")
+            print(f"File not found: {video_path}")
             sys.exit(1)
     else:
         video_path = ask_video_path()
 
-    if args.audio:
-        audio_path = Path(args.audio).expanduser().resolve()
-    else:
-        audio_path = find_audio(video_path, config["audio"])
+    audio_path = (
+        Path(args.audio).expanduser().resolve()
+        if args.audio
+        else find_file(video_path, config["audio"], "audio")
+    )
+    srt_path = (
+        Path(args.srt).expanduser().resolve()
+        if args.srt
+        else find_file(video_path, config["srt"], "subtitles")
+    )
 
-    # Shorts și auto lângă fișierul video
     out_dir = video_path.parent
     shorts_dir = out_dir / "shorts"
     auto_dir = out_dir / "auto"
@@ -280,8 +311,8 @@ def main() -> None:
 
     print(f"\nVideo:  {video_path}")
     print(f"Audio:  {audio_path}")
+    print(f"SRT:    {srt_path}")
     print(f"Output: {shorts_dir}")
-    print(f"Config: {len(config['segments'])} segmente\n")
 
     segments = config["segments"]
     for i, seg in enumerate(segments, 1):
@@ -289,33 +320,33 @@ def main() -> None:
         start = parse_time(seg["start"])
         end = parse_time(seg["end"])
 
-        print(f"[{i}/{len(segments)}] {name}  ({seg['start']} → {seg['end']})")
+        print(f"\n[{i}/{len(segments)}] {name}  ({seg['start']} → {seg['end']})")
 
-        print("  → detectez fața...")
+        print("  → detecting face...")
         x_offset = detect_face_offset(str(video_path), start, end)
         print(f"     x_offset = {x_offset}px")
 
         words_json = auto_dir / f"{name}_words.json"
-        if args.skip_whisper and words_json.exists():
-            print("  → Citesc JSON existent (--skip-whisper)...")
+        if args.skip_alignment and words_json.exists():
+            print("  → loading existing words JSON (--skip-alignment)...")
             words = json.loads(words_json.read_text())
         else:
-            print("  → Whisper word timestamps...")
+            print("  → forced alignment (WhisperX)...")
             with tempfile.TemporaryDirectory() as tmpdir:
-                words = run_whisper(str(audio_path), start, end, tmpdir)
+                words = run_forced_alignment(str(audio_path), str(srt_path), start, end, tmpdir)
             words_json.write_text(json.dumps(words, ensure_ascii=False, indent=2))
-        print(f"     {len(words)} cuvinte → {words_json.name}")
+        print(f"     {len(words)} words → {words_json.name}")
 
         ass_path = auto_dir / f"{name}_karaoke.ass"
         generate_karaoke_ass(words, str(ass_path))
-        print(f"     ASS generat → {ass_path.name}")
+        print(f"     ASS generated → {ass_path.name}")
 
         output = shorts_dir / f"Short{i}-{name}.mp4"
         print(f"  → render → {output.name}")
         render_short(str(video_path), x_offset, start, end, str(ass_path), str(output))
-        print(f"  ✓ {output}\n")
+        print(f"  ✓ {output}")
 
-    print(f"Gata! {len(segments)} short-uri în {shorts_dir}")
+    print(f"\nDone! {len(segments)} short(s) in {shorts_dir}")
 
 
 if __name__ == "__main__":

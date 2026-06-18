@@ -1,3 +1,6 @@
 opencv-python
 pysubs2
 pyyaml
+torch
+torchaudio
+whisperx
