@@ -18,6 +18,7 @@ import re
 import sys
 import unicodedata
 
+import yaml
 from openai import OpenAI
 
 BATCH_CHARS = 80000
@@ -119,6 +120,96 @@ def make_output_dir(video_file):
     return os.path.dirname(os.path.abspath(video_file))
 
 
+def parse_time_secs(t):
+    t = t.replace(",", ".")
+    h, m, s = t.split(":")
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
+def extract_segment_transcript(srt_path, start_str, end_str):
+    start = parse_time_secs(start_str)
+    end = parse_time_secs(end_str)
+    with open(srt_path, encoding="utf-8") as f:
+        content = f.read()
+    blocks = re.split(r"\n\n+", content.strip())
+    lines_out = []
+    for block in blocks:
+        lines = block.strip().splitlines()
+        if len(lines) < 3:
+            continue
+        ts = lines[1].split(" --> ")
+        ev_start = parse_time_secs(ts[0].strip())
+        ev_end = parse_time_secs(ts[1].strip())
+        if ev_end <= start or ev_start >= end:
+            continue
+        lines_out.append(" ".join(lines[2:]))
+    return " ".join(lines_out)
+
+
+def analyze_short_with_deepseek(transcript, segment_name, start, end):
+    prompt = f"""Ești un editor YouTube expert în Shorts virale.
+
+Generează metadata pentru un Short YouTube bazat pe transcriptul de mai jos.
+Numele segmentului: {segment_name} ({start} → {end})
+
+Returnează EXCLUSIV JSON valid:
+{{
+  "title": "titlu captivant max 60 caractere",
+  "description": "rând 1 hook\\nrând 2 context sau call to action",
+  "tags": ["tag1", "tag2", "tag3", "tag4", "tag5"],
+  "hashtags": "#Shorts #hashtag1 #hashtag2"
+}}
+
+TRANSCRIPT:
+{transcript}"""
+
+    response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.3,
+    )
+    raw = response.choices[0].message.content.strip()
+    raw = re.sub(r"^```(?:json)?\n?", "", raw)
+    raw = re.sub(r"\n?```$", "", raw)
+    return json.loads(raw)
+
+
+def generate_shorts_metadata(srt_file, config_path, shorts_dir, youtube_url):
+    with open(config_path, encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    segments = config.get("segments", [])
+    os.makedirs(shorts_dir, exist_ok=True)
+    for i, seg in enumerate(segments, 1):
+        name = seg["name"]
+        start = seg["start"]
+        end = seg["end"]
+        print(f"  [{i}/{len(segments)}] {name}  ({start} → {end})")
+        transcript = extract_segment_transcript(srt_file, start, end)
+        meta = analyze_short_with_deepseek(transcript, name, start, end)
+        tags_text = ", ".join(meta.get("tags", []))
+        content = f"""=== TITLU ===
+{meta.get('title', '')}
+
+=== DESCRIERE ===
+{meta.get('description', '')}
+
+Clip complet: {youtube_url}
+
+{meta.get('hashtags', '#Shorts')}
+
+=== TAGS ===
+{tags_text}
+
+=== INTERVAL DIN VIDEO ORIGINAL ===
+{start} → {end}
+"""
+        out = os.path.join(shorts_dir, f"{name}_metadata.txt")
+        with open(out, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"     ✓ {os.path.basename(out)}")
+        print(f"     Titlu: {meta.get('title', '—')}")
+
+
 def save_video_metadata(result, chapters, out_dir, basename):
     video = result.get("video", {})
     chapters_text = "\n".join(f"{ch['timestamp']} {ch['title']}" for ch in chapters)
@@ -211,15 +302,37 @@ def ask_selection(shorts):
 
 def main():
     if len(sys.argv) < 3:
-        print("Utilizare: python3 analyze_srt.py subtitles.srt video.mp4 [https://youtu.be/...]")
+        print("Utilizare: python3 analyze_srt.py subtitles.srt video.mp4 [youtube_url] [--shorts-config config.yaml]")
         sys.exit(1)
 
     srt_file = sys.argv[1]
     video_file = sys.argv[2]
-    youtube_url = sys.argv[3] if len(sys.argv) > 3 else "[LINK VIDEO PRINCIPAL]"
+
+    args = sys.argv[3:]
+    youtube_url = "[LINK VIDEO PRINCIPAL]"
+    shorts_config_path = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--shorts-config" and i + 1 < len(args):
+            shorts_config_path = args[i + 1]
+            i += 2
+        elif not args[i].startswith("--"):
+            youtube_url = args[i]
+            i += 1
+        else:
+            i += 1
+
+    out_dir = make_output_dir(video_file)
+    shorts_dir = os.path.join(out_dir, "shorts")
+
+    # --- Metadata per short din config ---
+    if shorts_config_path:
+        print(f"\nGenerez metadata per short din {shorts_config_path}...")
+        generate_shorts_metadata(srt_file, shorts_config_path, shorts_dir, youtube_url)
+        print(f"\nMetadata shorturi salvate în: {shorts_dir}/")
+        return
 
     basename = os.path.splitext(os.path.basename(srt_file))[0]
-    out_dir = make_output_dir(video_file)
 
     print(f"Parsez {srt_file}...")
     segments = parse_srt(srt_file)
@@ -244,7 +357,7 @@ def main():
     chapters_text = "\n".join(f"{ch['timestamp']} {ch['title']}" for ch in chapters)
     print(f"\nCapitole:\n{chapters_text}")
 
-    # --- Shorts: afișează rankat, cere confirmare ---
+    # --- Shorts candidate: afișează rankat ---
     shorts = result.get("shorts", [])
     shorts_sorted = sorted(shorts, key=lambda x: x.get("score", 0), reverse=True)
 
@@ -256,11 +369,6 @@ def main():
         print(f"    {s['title']}")
         print(f"    Hook   : {s.get('hook', '—')}")
         print(f"    Motiv  : {s.get('reason', '—')}")
-
-    output = os.path.join(out_dir, f"{basename}_analysis.json")
-    with open(output, "w", encoding="utf-8") as f:
-        json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"\nAnaliză salvată în: {out_dir}/")
 
     # --- Confirmare tăiere ---
     selected = ask_selection(shorts_sorted)
