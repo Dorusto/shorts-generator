@@ -52,10 +52,13 @@ Pipeline fully functional for end-to-end clip processing. Tested on Lenea clip (
 - [x] `youtube_url` in config auto-fills short descriptions
 - [x] Short candidates saved to `{basename}_shorts_candidates.txt`
 
-## Milestone 2 — Single Whisper run 🔲
+## Milestone 2 — Single Whisper run 🔲 ← highest value next
 
-- [ ] `transcribe.py` — run Whisper once, save both SRT and `_words.json`
-- [ ] `shorts_generator.py` reads existing `_words.json` if present (skip WhisperX)
+WhisperX forced alignment is the slowest step (~30s per segment). If word timestamps were saved on the first Whisper run, this entire step disappears.
+
+- [ ] `transcribe.py` — run `whisper` once, save both `.srt` and `_words.json` simultaneously
+- [ ] `shorts_generator.py` — if `_words.json` already exists for a segment, skip WhisperX entirely
+- [ ] Benefit: alignment step goes from ~30s to ~0s per segment
 
 ## Milestone 3 — `pipeline.py` orchestrator 🔲
 
@@ -74,6 +77,12 @@ Pipeline fully functional for end-to-end clip processing. Tested on Lenea clip (
 - [ ] Optional: YouTube Data API auto-upload with scheduled publish date
 
 ---
+
+## Before next clip — action items
+
+- [ ] **Segment names: no spaces** — `5 reguli AI` created `5 reguli AI_metadata.txt`. Use `5-reguli-AI` or `ReguliAI`. Affects filenames only, title in metadata can be anything.
+- [ ] **`corrections.txt` is incomplete** — "înrăbdare" was not caught. Add every missed Whisper error after each clip so the list grows over time.
+- [ ] **`youtube_url` workflow** — add URL to `shorts_config.yaml` after the main video is published, then re-run `analyze_srt.py --shorts-config` to refresh all short metadata with the real link.
 
 ## Known issues
 

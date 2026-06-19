@@ -57,9 +57,13 @@ Always fix text errors in the corrected SRT file — `shorts_generator.py` propa
 ## Config design
 
 - All segment info lives in `shorts_config.yaml` (git-ignored). Keep all segments there permanently — useful for re-generating metadata or re-rendering.
-- `youtube_url` in config auto-fills all short descriptions. Add it once after the main video is published.
+- `youtube_url` in config auto-fills all short descriptions. Add it once after the main video is published, then re-run `analyze_srt.py --shorts-config` to refresh metadata.
 - `x_offset` per segment overrides face detection — use when auto-detect picks wrong crop.
-- Segment names become filenames (`Short1-{name}.mp4`) — avoid spaces and special characters.
+- **Segment names become filenames** (`Short1-{name}.mp4`) — avoid spaces and special characters. Use `-` or `_`. The display title lives in the metadata file, not in the name.
+
+## Growing `corrections.txt`
+
+Every time a Whisper error slips through `correct_srt.py` undetected, add it to `corrections.txt` immediately. The file is git-ignored (personal vocabulary), but it compounds in value over time. After the Lenea clip: add `înrăbdare|nerăbdare`.
 
 ## SRT boundary trimming
 
