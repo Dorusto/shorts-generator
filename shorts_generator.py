@@ -57,8 +57,6 @@ def load_and_validate_config() -> dict:
 
     if not config.get("video") or config["video"] == "MyVideo.mp4":
         errors.append("  - 'video:' missing or not filled in")
-    if not config.get("audio") or config["audio"] == "MyVideo.mp3":
-        errors.append("  - 'audio:' missing or not filled in")
     if not config.get("srt") or config["srt"] == "MyVideo_corrected.srt":
         errors.append("  - 'srt:' missing or not filled in")
     if not config.get("segments"):
@@ -326,11 +324,13 @@ def main() -> None:
     else:
         video_path = ask_video_path()
 
-    audio_path = (
-        Path(args.audio).expanduser().resolve()
-        if args.audio
-        else find_file(video_path, config["audio"], "audio")
-    )
+    if args.audio:
+        audio_path = Path(args.audio).expanduser().resolve()
+    elif config.get("audio") and config["audio"] not in ("MyVideo.mp3",):
+        audio_path = find_file(video_path, config["audio"], "audio")
+    else:
+        audio_path = video_path  # extract audio directly from video
+
     srt_path = (
         Path(args.srt).expanduser().resolve()
         if args.srt
